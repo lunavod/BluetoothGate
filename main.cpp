@@ -21,7 +21,7 @@ int mqtt_socket;
 
 std::map<std::string, std::list<int>> subscriptions;
 
-std::list<std::string> disconnected_clients;
+std::map<int, std::string> disconnected_clients;
 
 void sendToBT(int bd, char *event, char *payload) {
     char buffer[strlen(event)+strlen(payload)+4];
@@ -73,14 +73,17 @@ void callback(char *topic_cstr, char *payload, int sd) {
     std::cout << "<< " << topic << " - " << payload << std::endl;
 
     if (topic == "MQTT_SUBSCRIBE") {
+        std::cout << "SUBBING" << std::endl;
         sub_msg msg;
         msg.topic_name = payload;
         msg.packet_id = 69;
         mqtt_subscribe(mqtt_socket, msg);
         try {
             subscriptions.at(std::string(payload)).push_back(sd);
+            std::cout << "ADD" << std::endl;
         } catch (const std::out_of_range&) {
             subscriptions.insert(std::pair<std::string, std::list<int>>(std::string(payload), std::list<int>{sd}));
+            std::cout << "INSERT" << std::endl;
         }
     }
 }
@@ -94,12 +97,11 @@ int main(int argc, char **argv)
 
     fd_set readfds;
     int max_clients = 30;
-    int sd, activity, valread;
-    int max_sd = 0;
+    int sd, max_sd, activity, valread;
     std::map<int, std::string>clients;
     struct timeval timeout;
     timeout.tv_sec = 0;
-    timeout.tv_usec = 10000;
+    timeout.tv_usec = 1000;
 
     mqtt_socket = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in address = { 0 }; // 1
@@ -111,7 +113,7 @@ int main(int argc, char **argv)
         exit(1);
     }
     
-    // connectToMqtt(mqtt_socket);
+    connectToMqtt(mqtt_socket);
 
     int i = 0;
     for (auto section: ini.sections) {
@@ -119,67 +121,68 @@ int main(int argc, char **argv)
         std::cout << section.second["mac"] << std::endl;
 
         std::string mac = section.second["mac"];
-        // clients.insert(std::pair<int, std::string>(connectToSocket(mac.c_str()), mac));
-        disconnected_clients.push_back(mac);
+        // sd = connectToSocket(mac.c_str());
+        disconnected_clients.insert(std::pair<int, std::string>(-1, mac));
+        std::cout << "Inserted  " << sd << std::endl;
         i++;
     }
 
     while (true) {
-        FD_ZERO(&readfds);        
-        
-        std::cout << "Set mqtt " << mqtt_socket << std::endl;
-
+        FD_ZERO(&readfds);
         for (auto it = disconnected_clients.begin(); it != disconnected_clients.end();) {
-            std::string mac = *it;
-            std::cout << "Trying to estabilish connection with " << mac << std::endl;
-            int r_sd = connectToSocket(mac.c_str());
-            if (r_sd < 0) {
-                std::cout << "... Fail" << std::endl;
-                ++it;
-                continue;
+            sd = it->first;
+            std::string mac = it->second;
+            
+            for (auto c_it = clients.begin(); c_it != clients.end();) {
+                if (c_it->second == mac) {
+                    clients.erase(c_it++);
+                    continue;
+                }
+                ++c_it;
             }
-            std::cout << "**** SUCCESS ****" << std::endl;
-            clients.insert(std::pair<int, std::string>(r_sd, mac));
-            disconnected_clients.erase(it++);
+
+            int new_sd = connectToSocket(mac.c_str());
+            if (new_sd < 0) continue;
+
+            clients.insert(std::pair<int, std::string>(new_sd, mac));
+            it = disconnected_clients.erase(it);
+            std::cout << "RECONNECTED. Clients: " << clients.size() << ", Disconnected clients: " << disconnected_clients.size() << std::endl;
         }
 
         for (auto it = clients.begin(); it != clients.end(); ++it) {
             sd = it->first;
             FD_SET(sd, &readfds);
-            std::cout << "Set " << sd << std::endl;
+            auto search = disconnected_clients.find(sd);
+            if (search != disconnected_clients.end()) {
+                disconnected_clients.erase(sd);
+                std::cout << "Erased" << std::endl;
+            }
+
             if (sd > max_sd) max_sd = sd;
         }
 
         FD_SET(mqtt_socket, &readfds);
-        // max_sd = mqtt_socket;
 
-        std::cout << "Max sd: " << max_sd << std::endl;
-        activity = select( max_sd+1 , &readfds , NULL , NULL , NULL);
-        std::cout << "Got activity" << std::endl;
+        activity = select( max_sd + 1 , &readfds , NULL , NULL , NULL);
 
         if ((activity < 0) && (errno!=EINTR)) {   
-            std::cout << "select error " << errno << std::endl;   
-            perror("Select error");
+            std::cout << "select error" << std::endl;   
         }
 
         if (FD_ISSET(mqtt_socket, &readfds)) {
-            std::cout << "#### ACTIVITY ON MASTER" << std::endl;
             char fixed_header[2] = { 0 };
             int n = recv(mqtt_socket, fixed_header, sizeof(fixed_header), 0);
             if (n < 0 || n == 0) {
-                std::cout << "MQTT DISCONNECT: " << n << std::endl;
-                reconnect:
+    reconnect:
                 int connected = -1;
                 do {
                     close(mqtt_socket);
                     mqtt_socket = socket(AF_INET, SOCK_STREAM, 0);
                     connected = connect(mqtt_socket, (struct sockaddr *)&address, sizeof(address));
-                    if (connected != -1) {
-                        connectToMqtt(mqtt_socket);
-                    }
                 } while (connected < 0);
-                // continue;
-                goto clients_flag;
+
+                connectToMqtt(mqtt_socket);
+                continue;
             }
 
             char msg[fixed_header[1]];
@@ -217,48 +220,39 @@ int main(int argc, char **argv)
                 
             }
         }
-        clients_flag:
-        std::cout << "Going to clients " << clients.size() << std::endl;
-        // readfds.fd_count = clients.size() + 1;
-        // for (int i = 0; i < readfds.fd_count; )
-        for (auto it = clients.begin(); it != clients.end();) {           
-            sd = it->first;
-            // std::cout << "Am i set? " << sd << std::endl;
 
+        for (auto it = clients.begin(); it != clients.end(); ++it) {
+            sd = it->first;
             if (!FD_ISSET(sd, &readfds)) continue;
-            std::cout << "******* SET ****** " << sd << std::endl;
 
             char buf[2];
             int recv_size;
             recv_size = recv(sd, &buf, sizeof(buf), MSG_WAITALL);
-            bool erased = false;
+
             if (recv_size <= 0) {
-disconnected:
                 std::cout << "DISCONNECTED " << it->second << std::endl;
-                disconnected_clients.push_back(it->second);
-                it = clients.erase(it);
-                erased = true;
-                std::cout << "Erased" << std::endl;
+                disconnected_clients.insert(std::pair<int, std::string>(it->first, it->second));
+                for (auto s_it = subscriptions.begin(); s_it != subscriptions.end(); ++s_it) {
+                    for (auto sd_it = s_it->second.begin(); sd_it != s_it->second.end();) {
+                        int descriptor = *sd_it;
+                        if (descriptor == sd) {
+                            sd_it = s_it->second.erase(sd_it);
+                            std::cout << "Erased SD from subscription " << s_it->first << std::endl;
+                        } else {
+                            ++sd_it;
+                        }
+                    }
+                }
                 continue;
-            }
-            std::cout << "Test" << std::endl;
-            if (!erased) {
-                std::cout << "Not erased" << std::endl;
-                ++it;
             }
 
             short x = short(buf[0] << 8 | buf[1]);
 
             char buffer[x+1];
             recv_size = recv(sd, &buffer, x, MSG_WAITALL);
-            if (recv_size <= 0) goto disconnected;
             buffer[recv_size] = '\0';
 
-            std::cout << "Got event" << std::endl;
-
-
             recv_size = recv(sd, &buf, sizeof(buf), MSG_WAITALL);
-            if (recv_size <= 0) goto disconnected;
             x = short(buf[0] << 8 | buf[1]);
 
             char buffer2[x+1];
