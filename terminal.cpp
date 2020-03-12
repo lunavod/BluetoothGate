@@ -5,6 +5,8 @@
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/rfcomm.h>
 
+// TODO: переписать под протокол
+
 int main(int argc, char **argv)
 {
     struct sockaddr_rc addr = { 0 };

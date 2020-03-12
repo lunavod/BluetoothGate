@@ -14,6 +14,7 @@
 
 #include "lib/inipp.h"
 #include "lib/mqtt.cpp"
+#include <bitset>
 
 using namespace std::chrono;
 
@@ -62,7 +63,7 @@ void connectToMqtt(int fd) {
     conn_message c_msg;
     // c_msg.flags = CLEAN_START;
     c_msg.flags = 0;
-    c_msg.keep_alive = 2;
+    c_msg.keep_alive = 60 * 60;
     c_msg.client_id = "BluetoothGate";
 
     mqtt_connect(fd, c_msg);
@@ -121,9 +122,8 @@ int main(int argc, char **argv)
         std::cout << section.second["mac"] << std::endl;
 
         std::string mac = section.second["mac"];
-        // sd = connectToSocket(mac.c_str());
         disconnected_clients.insert(std::pair<int, std::string>(-1, mac));
-        std::cout << "Inserted  " << sd << std::endl;
+        std::cout << "Inserted  " << -1 << std::endl;
         i++;
     }
 
@@ -142,11 +142,14 @@ int main(int argc, char **argv)
             }
 
             int new_sd = connectToSocket(mac.c_str());
-            if (new_sd < 0) continue;
+            if (new_sd < 0) {
+                // std::cout << "." << std::endl;
+                continue;
+            }
 
             clients.insert(std::pair<int, std::string>(new_sd, mac));
             it = disconnected_clients.erase(it);
-            std::cout << "RECONNECTED. Clients: " << clients.size() << ", Disconnected clients: " << disconnected_clients.size() << std::endl;
+            std::cout << "RECONNECTED (" << new_sd <<"). Clients: " << clients.size() << ", Disconnected clients: " << disconnected_clients.size() << std::endl;
         }
 
         for (auto it = clients.begin(); it != clients.end(); ++it) {
@@ -162,7 +165,7 @@ int main(int argc, char **argv)
         }
 
         FD_SET(mqtt_socket, &readfds);
-
+        std::cout << "Max sd: " << max_sd << std::endl;
         activity = select( max_sd + 1 , &readfds , NULL , NULL , NULL);
 
         if ((activity < 0) && (errno!=EINTR)) {   
@@ -170,6 +173,7 @@ int main(int argc, char **argv)
         }
 
         if (FD_ISSET(mqtt_socket, &readfds)) {
+            std::cout << "Activity on MQTT" << std::endl;
             char fixed_header[2] = { 0 };
             int n = recv(mqtt_socket, fixed_header, sizeof(fixed_header), 0);
             if (n < 0 || n == 0) {
@@ -192,6 +196,7 @@ int main(int argc, char **argv)
             }
 
             if (fixed_header[0] == CONN_ACK) {
+                std::cout << "CONN ACK" << std::endl;
 
             } else if (fixed_header[0] == SUB_ACK) {
                 std::cout << "SUBBED" << std::endl;
@@ -219,15 +224,20 @@ int main(int argc, char **argv)
                 }
                 
             }
+        } else {
+            std::cout << "Activity on clients" << std::endl;
         }
 
         for (auto it = clients.begin(); it != clients.end(); ++it) {
             sd = it->first;
-            if (!FD_ISSET(sd, &readfds)) continue;
+                std::cout << "CLIENT CHECK " << sd << std::endl;
 
+            if (!FD_ISSET(sd, &readfds)) continue;
+                std::cout << "CLIENT READ" << std::endl;
             char buf[2];
             int recv_size;
             recv_size = recv(sd, &buf, sizeof(buf), MSG_WAITALL);
+            std::cout << "R1" << std::endl;
 
             if (recv_size <= 0) {
                 std::cout << "DISCONNECTED " << it->second << std::endl;
@@ -250,6 +260,7 @@ int main(int argc, char **argv)
 
             char buffer[x+1];
             recv_size = recv(sd, &buffer, x, MSG_WAITALL);
+            std::cout << "R2" << std::endl;
             buffer[recv_size] = '\0';
 
             recv_size = recv(sd, &buf, sizeof(buf), MSG_WAITALL);
@@ -257,6 +268,7 @@ int main(int argc, char **argv)
 
             char buffer2[x+1];
             recv_size = recv(sd, &buffer2, x, MSG_WAITALL);
+            std::cout << "R3" << std::endl;
             buffer2[recv_size] = '\0';
             callback(buffer, buffer2, sd);
         }

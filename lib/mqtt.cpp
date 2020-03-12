@@ -155,6 +155,8 @@ void mqtt_publish(int fd, pub_message msg) {
         data[size] = msg.payload[i];
     }
 
+    size++;
+
     char encoded_size[4];
     int encoded_size_len = encode(size, encoded_size);
 
